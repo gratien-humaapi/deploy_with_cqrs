@@ -1,4 +1,5 @@
 use cqrs_es::Aggregate;
+use uuid::Uuid;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -7,30 +8,21 @@ use std::{
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use cqrs_es::{mem_store::MemStore, CqrsFramework, EventStore, Query};
 use deploy_with_cqrs::{
-    deployment::{Deployment, DeploymentCommand, DeploymentServices, DeploymentStatusQuery},
+    deployment::{Deployment, DeploymentCommand, DeploymentEvent, DeploymentServices, DeploymentStatusQuery},
     state::{new_app_state, AppState},
 };
 
-// pub async fn handle_command(deployments: HashMap<i32, Deployment>, id: i32, command: DeploymentCommand) -> Result<(), String> {
-//     if let Some(state) = deployments.get(&id) {
-//         let mut new_state = state.clone();
-//         let events = new_state.ha(command).await;
-//         for event in events {
-//             new_state.apply(event);
-//         }
-//         manager.update_deployment(&id, new_state);
-//     }
-//     Ok(())
-// }
 
 #[post("/deploy")]
-async fn deploy(data: web::Data<AppState>) -> impl Responder {
-    let mut manager = data.manager.lock().unwrap();
-    let cqrs = &data.cqrs;
+async fn deploy(event_store: web::Data<MemStore<Deployment>>) -> impl Responder {
+    let query = DeploymentStatusQuery {};
+    let cqrs = CqrsFramework::new(
+        event_store.as_ref().clone(),
+        vec![Box::new(query)],
+        DeploymentServices,
+    );
 
-    let id = manager.create_deployment();
-
-    let aggregate_id = id.to_string();
+    let aggregate_id = Uuid::new_v4().to_string();
 
     // Étape 1 : Soumission du déploiement
     if let Err(e) = cqrs
@@ -66,46 +58,69 @@ async fn deploy(data: web::Data<AppState>) -> impl Responder {
     }
 
     // Étape 4 : Gestion du succès ou de l’échec de l'état Pending
-    let deployment_success = true; // Simulez la réussite ou l'échec ici.
-    if deployment_success {
-        if let Err(e) = cqrs.execute(&aggregate_id, DeploymentCommand::Deploy).await {
-            return HttpResponse::InternalServerError()
-                .body(format!("Erreur lors du déploiement : {:?}", e));
-        }
-    } else {
-        if let Err(e) = cqrs
-            .execute(&aggregate_id, DeploymentCommand::CancelDeployment)
-            .await
-        {
-            return HttpResponse::InternalServerError().body(format!(
-                "Erreur lors de l'annulation du déploiement : {:?}",
-                e
-            ));
-        }
-    }
+    // let deployment_success = true; // Simulez la réussite ou l'échec ici.
+    // if deployment_success {
+    //     if let Err(e) = cqrs.execute(&aggregate_id, DeploymentCommand::Deploy).await {
+    //         return HttpResponse::InternalServerError()
+    //             .body(format!("Erreur lors du déploiement : {:?}", e));
+    //     }
+    // } else {
+    //     if let Err(e) = cqrs
+    //         .execute(&aggregate_id, DeploymentCommand::CancelDeployment)
+    //         .await
+    //     {
+    //         return HttpResponse::InternalServerError().body(format!(
+    //             "Erreur lors de l'annulation du déploiement : {:?}",
+    //             e
+    //         ));
+    //     }
+    // }
 
     HttpResponse::Ok().body("Processus de déploiement terminé.")
 }
 
 #[get("/status/{id}")]
-async fn get_deploy_status(data: web::Data<AppState>, path: web::Path<i32>) -> impl Responder {
-    let manager = data.manager.lock().unwrap();
-    let query = data.query.as_ref();
-    
-    let id = path.into_inner();
-    
-    query.dispatch(&id.to_string(), events);
+async fn get_status(
+    id: actix_web::web::Path<String>,
+    event_store: web::Data<MemStore<Deployment>>,
+) -> impl Responder {
+    let aggregate_id = id.into_inner();
 
-    HttpResponse::Ok().json(format!("status : {:?}", status.unwrap()))
+    // Charge les événements directement à partir du magasin d'événements
+    let events = event_store
+        .as_ref()
+        .load_events(&aggregate_id)
+        .await
+        .unwrap_or_else(|_| vec![]);
+
+    if events.is_empty() {
+        return HttpResponse::NotFound().body("Déploiement introuvable.");
+    }
+
+    // Parcourt les événements pour trouver le dernier statut
+    let mut status = "unknown".to_string();
+    for event in &events {
+        match &event.payload {
+            DeploymentEvent::DeploymentSubmited { .. } => status = "submitted".to_string(),
+            DeploymentEvent::ManifestValidated { .. } => status = "validated".to_string(),
+            DeploymentEvent::DeploymentProcessed { .. } => status = "processing".to_string(),
+            DeploymentEvent::Deployed { .. } => status = "deployed".to_string(),
+            DeploymentEvent::DeploymentCanceled { .. } => status = "cancelled".to_string(),
+        }
+    }
+
+    HttpResponse::Ok().body(format!("Statut actuel : {}", status))
 }
+
 
 #[actix_web::main] // or #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let state = web::Data::new(new_app_state().await);
+    // let state = web::Data::new(new_app_state().await);
+    let event_store = web::Data::new(MemStore::<Deployment>::default());
 
     HttpServer::new(move || {
-        App::new().app_data(state.clone()).service(deploy)
-        .service(get_deploy_status)
+        App::new().app_data(event_store.clone()).service(deploy)
+        .service(get_status)
     })
     .bind(("127.0.0.1", 8080))?
     .run()
