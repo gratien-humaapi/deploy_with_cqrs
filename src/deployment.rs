@@ -1,36 +1,45 @@
-// #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-// enum DeployStatus {
-//     Submitted,
-//     Validated,
-//     Pending,
-//     Deployed,
-//     Cancelled
-// }
+
 
 use std::fmt::{Display, Formatter};
 
 use async_trait::async_trait;
 use cqrs_es::{Aggregate, DomainEvent, EventEnvelope, Query};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::helper::execute_task;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub enum DeploymentCommand {
-    SubmitDeployment,
-    ValidateManifest,
-    ProcessDeployment,
-    Deploy,
-    CancelDeployment,
+    SubmitDeployment { deployment_id: String },
+    ValidateManifest { deployment_id: String },
+    ProcessDeployment { deployment_id: String },
+    Deploy { deployment_id: String },
+    CancelDeployment { deployment_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DeploymentEvent {
-    DeploymentSubmited { status: String },
-    ManifestValidated { status: String },
-    DeploymentProcessed { status: String },
-    Deployed { status: String },
-    DeploymentCanceled { status: String },
+    DeploymentSubmited {
+        deployment_id: String,
+        status: String,
+    },
+    ManifestValidated {
+        deployment_id: String,
+        status: String,
+    },
+    DeploymentProcessed {
+        deployment_id: String,
+        status: String,
+    },
+    Deployed {
+        deployment_id: String,
+        status: String,
+    },
+    DeploymentCanceled {
+        deployment_id: String,
+        status: String,
+    },
 }
 
 impl DomainEvent for DeploymentEvent {
@@ -101,7 +110,7 @@ impl Aggregate for Deployment {
         services: &Self::Services,
     ) -> Result<Vec<Self::Event>, Self::Error> {
         match command {
-            DeploymentCommand::SubmitDeployment => {
+            DeploymentCommand::SubmitDeployment { deployment_id } => {
                 if self.status == "submitted"
                     || self.status == "validated"
                     || self.status == "processing"
@@ -113,18 +122,22 @@ impl Aggregate for Deployment {
                 }
                 Ok(vec![DeploymentEvent::DeploymentSubmited {
                     status: "submitted".to_string(),
+                    deployment_id
                 }])
             }
-            DeploymentCommand::ValidateManifest { .. } => {
+            DeploymentCommand::ValidateManifest { deployment_id } => {
                 if self.status != "submitted" {
                     return Err(DeploymentError::from(
                         "Impossible de valider un manifeste non soumis.",
                     ));
                 }
                 let status = services.validate_manifest(String::new()).await?;
-                Ok(vec![DeploymentEvent::ManifestValidated { status }])
+                Ok(vec![DeploymentEvent::ManifestValidated {
+                    deployment_id,
+                    status,
+                }])
             }
-            DeploymentCommand::ProcessDeployment => {
+            DeploymentCommand::ProcessDeployment { deployment_id } => {
                 // Autoriser uniquement si l'état est "validated"
                 if self.status != "validated" {
                     return Err(DeploymentError::from(
@@ -139,15 +152,17 @@ impl Aggregate for Deployment {
                 if pending_result.is_ok() {
                     Ok(vec![DeploymentEvent::Deployed {
                         status: "deployed".to_string(),
+                        deployment_id,
                     }])
                 } else {
                     Ok(vec![DeploymentEvent::DeploymentCanceled {
                         status: "cancelled".to_string(),
+                        deployment_id,
                     }])
                 }
             }
 
-            DeploymentCommand::Deploy => {
+            DeploymentCommand::Deploy { deployment_id } => {
                 if self.status != "processing" {
                     return Err(DeploymentError::from(
                         "Impossible de déployer un déploiement non en cours de traitement.",
@@ -155,9 +170,10 @@ impl Aggregate for Deployment {
                 }
                 Ok(vec![DeploymentEvent::Deployed {
                     status: "deployed".to_string(),
+                    deployment_id,
                 }])
             }
-            DeploymentCommand::CancelDeployment => {
+            DeploymentCommand::CancelDeployment { deployment_id } => {
                 if self.status == "cancelled" || self.status == "deployed" {
                     return Err(DeploymentError::from(
                         "Impossible d'annuler un déploiement finalisé.",
@@ -165,6 +181,7 @@ impl Aggregate for Deployment {
                 }
                 Ok(vec![DeploymentEvent::DeploymentCanceled {
                     status: "cancelled".to_string(),
+                    deployment_id,
                 }])
             }
         }
@@ -172,27 +189,27 @@ impl Aggregate for Deployment {
 
     fn apply(&mut self, event: Self::Event) {
         match event {
-            DeploymentEvent::DeploymentSubmited { status } => {
+            DeploymentEvent::DeploymentSubmited { status, .. } => {
                 self.status = status;
                 println!("Submitting Deployment ...");
             }
 
-            DeploymentEvent::ManifestValidated { status } => {
+            DeploymentEvent::ManifestValidated { status, .. } => {
                 self.status = status;
                 println!("Validating manifest ...");
             }
 
-            DeploymentEvent::DeploymentProcessed { status } => {
+            DeploymentEvent::DeploymentProcessed { status, .. } => {
                 self.status = status;
                 println!("Processing Deployment ...");
             }
 
-            DeploymentEvent::Deployed { status } => {
+            DeploymentEvent::Deployed { status, .. } => {
                 self.status = status;
                 println!("Deploying ...");
             }
 
-            DeploymentEvent::DeploymentCanceled { status } => {
+            DeploymentEvent::DeploymentCanceled { status, .. } => {
                 self.status = status;
                 println!("Cancelling ...");
             }
@@ -221,11 +238,11 @@ impl Query<Deployment> for DeploymentStatusQuery {
 
         for event in events {
             match &event.payload {
-                DeploymentEvent::DeploymentSubmited { status: s }
-                | DeploymentEvent::ManifestValidated { status: s }
-                | DeploymentEvent::DeploymentProcessed { status: s }
-                | DeploymentEvent::Deployed { status: s }
-                | DeploymentEvent::DeploymentCanceled { status: s } => {
+                DeploymentEvent::DeploymentSubmited { status: s,.. }
+                | DeploymentEvent::ManifestValidated { status: s, .. }
+                | DeploymentEvent::DeploymentProcessed { status: s, .. }
+                | DeploymentEvent::Deployed { status: s, .. }
+                | DeploymentEvent::DeploymentCanceled { status: s, .. } => {
                     status = s.clone();
                 }
             }
